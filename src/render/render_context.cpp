@@ -13,6 +13,7 @@
 #include "render/scene/image_node.h"
 #include "render/scene/node.h"
 #include "render/scene/rect_node.h"
+#include "render/scene/spinner_node.h"
 #include "render/scene/text_node.h"
 #include "render/scene/wallpaper_node.h"
 
@@ -285,6 +286,13 @@ void RenderContext::renderNode(
       stop.color.a *= effectiveOpacity;
     }
     m_backend->drawRect(sw, sh, node->width(), node->height(), style, worldTransform);
+    break;
+  }
+  case NodeType::Spinner: {
+    const auto* spinner = static_cast<const SpinnerNode*>(node);
+    auto style = spinner->style();
+    style.color.a *= effectiveOpacity;
+    m_backend->drawSpinner(sw, sh, node->width(), node->height(), style, worldTransform);
     break;
   }
   case NodeType::Text: {

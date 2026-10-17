@@ -10,6 +10,7 @@
 #include "render/core/wallpaper_types.h"
 #include "render/scene/input_dispatcher.h"
 #include "render/scene/node.h"
+#include "render/scene/spinner_node.h"
 
 #include <chrono>
 #include <cstddef>
@@ -100,6 +101,8 @@ private:
   void tryAuthenticate();
   void handleGreetdResponse(const GreetdResponse& response);
   void handleAuthMessage(const GreetdAuthMessage& message);
+  void setBusyIndicator(bool busy);
+  void spinSignInSpinner();
   void postAuthResponse(const std::string& data);
   // Disable the password field and login button while a request is in flight.
   void syncAuthInteractivity();
@@ -229,6 +232,7 @@ private:
   Input* m_passwordField = nullptr;
   Button* m_loginButton = nullptr;
   Button* m_backButton = nullptr;
+  SpinnerNode* m_signInSpinner = nullptr;
   Label* m_statusLabel = nullptr;
   RectNode* m_configErrorBanner = nullptr;
   Label* m_configErrorHeading = nullptr;

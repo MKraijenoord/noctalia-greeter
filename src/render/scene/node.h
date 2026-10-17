@@ -56,6 +56,7 @@ enum class NodeType : std::uint8_t {
   Image,
   Glyph,
   Wallpaper,
+  Spinner,
   InputArea,
   Container,
 };

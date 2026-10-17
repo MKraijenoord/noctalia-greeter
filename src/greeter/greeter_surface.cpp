@@ -498,6 +498,11 @@ void GreeterSurface::initialize(RenderContext* context) {
   m_loginButton->setAnimationManager(nullptr);
   m_root.addChild(std::move(loginBtn));
 
+  auto signInSpinner = std::make_unique<SpinnerNode>();
+  signInSpinner->setZIndex(7);
+  signInSpinner->setVisible(false);
+  m_signInSpinner = static_cast<SpinnerNode*>(m_root.addChild(std::move(signInSpinner)));
+
   auto backBtn = std::make_unique<Button>();
   backBtn->setGlyph("arrow-left");
   backBtn->setGlyphSize(16.0f);
@@ -1359,6 +1364,14 @@ void GreeterSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
     m_loginButton->setSize(buttonWidth, Style::controlHeight());
     m_loginButton->setPosition((contentLeft + inputWidth + gap), (contentTop));
     m_loginButton->layout(*renderer);
+    const float spinnerSize = std::round(Style::controlHeight() * 0.5f);
+    m_signInSpinner->setSize(spinnerSize, spinnerSize);
+    m_signInSpinner->setPosition(
+        std::round(contentLeft + inputWidth + gap + (buttonWidth - spinnerSize) * 0.5f),
+        std::round(contentTop + (Style::controlHeight() - spinnerSize) * 0.5f)
+    );
+    m_signInSpinner->setThickness(std::max(2.0f, std::round(spinnerSize * 0.12f)));
+    m_signInSpinner->setColor(colorForRole(ColorRole::OnPrimary));
     if (Glyph* loginGlyph = m_loginButton->glyph()) {
       (void)loginGlyph->measure(*renderer);
       const auto glyphMetrics = renderer->measureGlyph(loginGlyph->codepoint(), loginGlyph->fontSize());
@@ -1527,6 +1540,33 @@ void GreeterSurface::handleGreetdResponse(const GreetdResponse& response) {
   }
 }
 
+void GreeterSurface::setBusyIndicator(bool busy) {
+  if (m_signInSpinner == nullptr || m_signInSpinner->visible() == busy) {
+    return;
+  }
+  m_signInSpinner->setVisible(busy);
+  if (Glyph* loginGlyph = m_loginButton->glyph()) {
+    loginGlyph->setVisible(!busy);
+  }
+  if (busy) {
+    spinSignInSpinner();
+  } else {
+    m_animations.cancelForOwner(m_signInSpinner);
+  }
+  requestLayout();
+}
+
+void GreeterSurface::spinSignInSpinner() {
+  constexpr float kTurn = 6.28318530718f;
+  constexpr float kTurnMs = 900.0f;
+  // One long linear animation: restarting from onComplete would modify the animation list while it is ticking.
+  constexpr float kTurns = 10000.0f;
+  m_animations.animate(
+      0.0f, kTurn * kTurns, kTurnMs * kTurns, Easing::Linear,
+      [this](float angle) { m_signInSpinner->setRotation(std::fmod(angle, kTurn)); }, nullptr, m_signInSpinner
+  );
+}
+
 void GreeterSurface::handleAuthMessage(const GreetdAuthMessage& message) {
   const char* typeName = message.type == GreetdAuthMessageType::Secret ? "secret"
       : message.type == GreetdAuthMessageType::Visible                 ? "visible"
@@ -1589,13 +1629,15 @@ void GreeterSurface::postAuthResponse(const std::string& data) {
 }
 
 void GreeterSurface::syncAuthInteractivity() {
-  const bool busy = m_greetdUnavailable || m_sharedAuthBlocked || awaitingReply();
+  const bool working = awaitingReply();
+  const bool busy = m_greetdUnavailable || m_sharedAuthBlocked || working;
   if (m_passwordField != nullptr) {
     m_passwordField->setEnabled(!busy);
   }
   if (m_loginButton != nullptr) {
     m_loginButton->setEnabled(!busy);
   }
+  setBusyIndicator(working);
 }
 
 void GreeterSurface::setSharedAuthBlocked(const bool blocked) {
