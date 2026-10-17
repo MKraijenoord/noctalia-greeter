@@ -16,7 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <syslog.h>
@@ -25,7 +27,9 @@
 #include <wayland-server-core.h>
 #include <wayland-server-protocol.h>
 #include <wlr/backend.h>
+#include <wlr/backend/drm.h>
 #include <wlr/backend/libinput.h>
+#include <wlr/backend/multi.h>
 #include <wlr/backend/session.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/render/allocator.h>
@@ -176,6 +180,10 @@ struct greeter_output {
   bool active;
   bool render_initialized;
   bool lid_suppressed;
+  bool commit_pending;
+  struct wl_listener present;
+  bool present_watched;
+  bool presented;
 };
 
 struct greeter_keyboard {
@@ -304,6 +312,13 @@ struct greeter_server {
   size_t output_placement_count;
   struct wlr_fractional_scale_manager_v1* fractional_scale;
   bool shutting_down;
+  // Started by greetd behind a running user session (logout handover): outputs keep the session's last frame until
+  // this VT becomes active, then the first commit replaces it without a modeset.
+  bool prestart;
+  const char* handover_socket;
+  struct wl_event_source* prestart_frame_timer;
+  struct wl_event_source* presented_fallback;
+  bool presented_sent;
 };
 
 static char* trim(char* value) {
@@ -1333,6 +1348,9 @@ static void clear_output_before_disable(struct greeter_output* output) {
 }
 
 static void disable_output(struct greeter_output* output) {
+  if (!session_is_active(output->server)) {
+    return;
+  }
   // Disabling the CRTC does not overwrite its framebuffer, and some displays
   // keep showing that last scanout after signal loss. Replace it with black
   // first, but still attempt the disable if rendering fails.
@@ -1563,7 +1581,13 @@ static bool layout_output_at(struct greeter_output* output, int layout_x, int la
 
 static bool enable_layout_output(struct greeter_output* output, int layout_x, int layout_y) {
   struct greeter_server* server = output->server;
-  if (!commit_output_enabled(output)) {
+  if (!session_is_active(server)) {
+    if (!output->wlr_output->enabled || !initialize_output_render(output)) {
+      return false;
+    }
+    output->commit_pending = true;
+    wlr_log(WLR_INFO, "output %s: session inactive, keeping the live frame until activation", output->wlr_output->name);
+  } else if (!commit_output_enabled(output)) {
     return false;
   }
 
@@ -1720,7 +1744,7 @@ static void layout_all_outputs(struct greeter_server* server, bool suppress_inte
 }
 
 static void choose_outputs(struct greeter_server* server) {
-  if (server->shutting_down || !session_is_active(server)) {
+  if (server->shutting_down || (!session_is_active(server) && !server->prestart)) {
     return;
   }
 
@@ -1801,6 +1825,9 @@ static void handle_output_destroy(struct wl_listener* listener, void* data) {
   wl_list_remove(&output->frame.link);
   wl_list_remove(&output->request_state.link);
   wl_list_remove(&output->destroy.link);
+  if (output->present_watched) {
+    wl_list_remove(&output->present.link);
+  }
   wl_list_remove(&output->link);
   free(output);
   if (!server->shutting_down) {
@@ -2277,6 +2304,200 @@ static void handle_new_input(struct wl_listener* listener, void* data) {
   wlr_seat_set_capabilities(server->seat, caps);
 }
 
+static void send_handover(struct greeter_server* server, const char* message) {
+  if (server->handover_socket == NULL || server->handover_socket[0] == '\0') {
+    return;
+  }
+  struct sockaddr_un addr = {.sun_family = AF_UNIX};
+  if (strlen(server->handover_socket) >= sizeof(addr.sun_path)) {
+    return;
+  }
+  strcpy(addr.sun_path, server->handover_socket);
+  const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    return;
+  }
+  if (sendto(fd, message, strlen(message), MSG_NOSIGNAL, (const struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    wlr_log_errno(WLR_ERROR, "failed to send %s to greetd", message);
+  }
+  close(fd);
+}
+
+static void send_presented(struct greeter_server* server) {
+  if (server->presented_sent) {
+    return;
+  }
+  server->presented_sent = true;
+  wlr_log(WLR_INFO, "greeter presented on every output; releasing the session");
+  send_handover(server, "PRESENTED=1");
+  struct greeter_output* output;
+  wl_list_for_each(output, &server->outputs, link) {
+    if (output->present_watched) {
+      wl_list_remove(&output->present.link);
+      output->present_watched = false;
+    }
+  }
+  if (server->presented_fallback != NULL) {
+    wl_event_source_remove(server->presented_fallback);
+    server->presented_fallback = NULL;
+  }
+}
+
+static void handle_output_present(struct wl_listener* listener, void* data) {
+  struct greeter_output* output = wl_container_of(listener, output, present);
+  const struct wlr_output_event_present* event = data;
+  if (event == NULL || !event->presented) {
+    return;
+  }
+  output->presented = true;
+  struct greeter_output* other;
+  wl_list_for_each(other, &output->server->outputs, link) {
+    if (other->present_watched && !other->presented) {
+      return;
+    }
+  }
+  send_presented(output->server);
+}
+
+static int handle_presented_fallback(void* data) {
+  struct greeter_server* server = data;
+  wlr_log(WLR_ERROR, "not every output reported a presented frame; releasing the session anyway");
+  server->presented_fallback = NULL;
+  send_presented(server);
+  return 0;
+}
+
+// First commit after a prestart: shows the greeter's scene without a modeset when the live mode already matches.
+static bool commit_output_seamless(struct greeter_output* output) {
+  struct greeter_server* server = output->server;
+  struct wlr_output* wlr_output = output->wlr_output;
+  if (output->scene_output == NULL || !initialize_output_render(output)) {
+    return false;
+  }
+
+  struct wlr_output_state state;
+  wlr_output_state_init(&state);
+  if (!wlr_output->enabled) {
+    wlr_output_state_set_enabled(&state, true);
+  }
+  const int refresh_mhz = output_refresh_rate(server, wlr_output);
+  struct wlr_output_mode* mode =
+      select_output_mode(wlr_output, server->manual_mode_width, server->manual_mode_height, refresh_mhz);
+  if (mode != NULL && (!wlr_output->enabled || wlr_output->current_mode != mode)) {
+    wlr_output_state_set_mode(&state, mode);
+  } else if (mode != NULL) {
+    wlr_log(WLR_INFO, "output %s: keeping live mode %dx%d", wlr_output->name, mode->width, mode->height);
+  }
+  const enum wl_output_transform transform = transform_for_output(server, wlr_output);
+  if (wlr_output->transform != transform) {
+    wlr_output_state_set_transform(&state, transform);
+  }
+  const float scale =
+      output_ui_scale(server, wlr_output, mode != NULL ? mode->width : 0, mode != NULL ? mode->height : 0);
+  if (wlr_output->scale != scale) {
+    wlr_output_state_set_scale(&state, scale);
+  }
+
+  bool ok = wlr_scene_output_build_state(output->scene_output, &state, NULL)
+      && wlr_output_commit_state(wlr_output, &state);
+  wlr_output_state_finish(&state);
+  if (!ok) {
+    wlr_log(WLR_ERROR, "output %s: seamless commit failed; enabling it the regular way", wlr_output->name);
+    return commit_output_enabled(output);
+  }
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  wlr_scene_output_send_frame_done(output->scene_output, &now);
+  return true;
+}
+
+static int handle_prestart_frame_timer(void* data) {
+  struct greeter_server* server = data;
+  if (session_is_active(server)) {
+    server->prestart_frame_timer = NULL;
+    return 0;
+  }
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  struct greeter_output* output;
+  wl_list_for_each(output, &server->outputs, link) {
+    if (output->scene_output != NULL) {
+      wlr_scene_output_send_frame_done(output->scene_output, &now);
+    }
+  }
+  wl_event_source_timer_update(server->prestart_frame_timer, 16);
+  return 0;
+}
+
+static void add_prestart_input(void* data) {
+  struct greeter_server* server = data;
+  struct wlr_backend* input = wlr_libinput_backend_create(server->session);
+  if (input == NULL) {
+    wlr_log(WLR_ERROR, "failed to create the libinput backend");
+    return;
+  }
+  wlr_multi_backend_add(server->backend, input);
+  if (!wlr_backend_start(input)) {
+    wlr_log(WLR_ERROR, "failed to start the libinput backend");
+  }
+}
+
+static void finish_prestart(struct greeter_server* server) {
+  wlr_log(WLR_INFO, "session active; replacing the user session's frame");
+  struct greeter_output* output;
+  wl_list_for_each(output, &server->outputs, link) {
+    if (!output->commit_pending) {
+      continue;
+    }
+    output->present.notify = handle_output_present;
+    wl_signal_add(&output->wlr_output->events.present, &output->present);
+    output->present_watched = true;
+  }
+  wl_list_for_each(output, &server->outputs, link) {
+    if (output->commit_pending) {
+      output->commit_pending = false;
+      commit_output_seamless(output);
+    }
+  }
+  server->presented_fallback =
+      wl_event_loop_add_timer(wl_display_get_event_loop(server->display), handle_presented_fallback, server);
+  wl_event_source_timer_update(server->presented_fallback, 1000);
+  wl_event_loop_add_idle(wl_display_get_event_loop(server->display), add_prestart_input, server);
+  server->prestart = false;
+}
+
+static struct wlr_backend* create_prestart_backend(struct greeter_server* server) {
+  struct wl_event_loop* loop = wl_display_get_event_loop(server->display);
+  server->session = wlr_session_create(loop);
+  if (server->session == NULL) {
+    return NULL;
+  }
+  struct wlr_backend* multi = wlr_multi_backend_create(loop);
+  if (multi == NULL) {
+    return NULL;
+  }
+  struct wlr_device* gpus[8];
+  const ssize_t gpu_count = wlr_session_find_gpus(server->session, 8, gpus);
+  struct wlr_backend* primary = NULL;
+  for (ssize_t i = 0; i < gpu_count; ++i) {
+    struct wlr_backend* drm = wlr_drm_backend_create(server->session, gpus[i], primary);
+    if (drm == NULL) {
+      continue;
+    }
+    if (primary == NULL) {
+      primary = drm;
+    }
+    wlr_multi_backend_add(multi, drm);
+  }
+  if (primary == NULL) {
+    wlr_log(WLR_ERROR, "prestart: no DRM backend could be created");
+    wlr_backend_destroy(multi);
+    return NULL;
+  }
+  wlr_log(WLR_INFO, "prestart: backends created with the session %s", server->session->active ? "active" : "inactive");
+  return multi;
+}
+
 static void handle_session_active(struct wl_listener* listener, void* data) {
   (void)data;
   struct greeter_server* server = wl_container_of(listener, server, session_active);
@@ -2287,6 +2508,10 @@ static void handle_session_active(struct wl_listener* listener, void* data) {
   if (!server->session->active) {
     wlr_log(WLR_INFO, "session inactive; pausing output commits");
     return;
+  }
+
+  if (server->prestart) {
+    finish_prestart(server);
   }
 
   wlr_log(WLR_INFO, "session active; restoring outputs and keyboard focus");
@@ -2646,7 +2871,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.display), &server.session);
+  server.prestart = getenv("GREETD_HANDOVER_PRESTART") != NULL;
+  server.handover_socket = getenv("GREETD_HANDOVER_SOCKET");
+  if (server.prestart) {
+    server.backend = create_prestart_backend(&server);
+  } else {
+    server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.display), &server.session);
+  }
   if (server.backend == NULL) {
     compositor_log_stderr(LOG_ERR, "failed to create wlroots backend\n");
     cleanup_server_resources(&server);
@@ -2763,6 +2994,14 @@ int main(int argc, char** argv) {
 
   struct wl_event_loop* loop = wl_display_get_event_loop(server.display);
   server.sigchld_source = wl_event_loop_add_signal(loop, SIGCHLD, handle_sigchld, &server);
+  if (server.prestart) {
+    if (session_is_active(&server)) {
+      finish_prestart(&server);
+    } else {
+      server.prestart_frame_timer = wl_event_loop_add_timer(loop, handle_prestart_frame_timer, &server);
+      wl_event_source_timer_update(server.prestart_frame_timer, 16);
+    }
+  }
   if (server.idle_timeout_sec > 0) {
     server.idle_timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (server.idle_timerfd < 0) {

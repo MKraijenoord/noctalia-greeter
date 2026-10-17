@@ -101,6 +101,7 @@ private:
   void tryAuthenticate();
   void handleGreetdResponse(const GreetdResponse& response);
   void handleAuthMessage(const GreetdAuthMessage& message);
+  void beginSigningIn();
   void setBusyIndicator(bool busy);
   void spinSignInSpinner();
   void postAuthResponse(const std::string& data);
@@ -233,6 +234,7 @@ private:
   Button* m_loginButton = nullptr;
   Button* m_backButton = nullptr;
   SpinnerNode* m_signInSpinner = nullptr;
+  bool m_signingIn = false;
   Label* m_statusLabel = nullptr;
   RectNode* m_configErrorBanner = nullptr;
   Label* m_configErrorHeading = nullptr;
