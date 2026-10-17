@@ -1453,7 +1453,7 @@ void GreeterSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
 
 void GreeterSurface::tryAuthenticate() {
   // Ignore re-submits while a request is already in flight.
-  if (m_greetdClient == nullptr || m_greetdUnavailable || m_sharedAuthBlocked || awaitingReply()) {
+  if (m_greetdClient == nullptr || m_greetdUnavailable || m_sharedAuthBlocked || awaitingReply() || m_signingIn) {
     return;
   }
   if (m_username.empty()) {
@@ -1566,6 +1566,12 @@ void GreeterSurface::handleGreetdResponse(const GreetdResponse& response) {
     return;
   case GreetdResponseType::Success:
     if (expected == AuthRequest::StartSession) {
+      if (std::getenv("GREETD_HANDOVER") != nullptr) {
+        // greetd keeps this frame on screen until the session has presented its own, then terminates us.
+        kLog.info("session start confirmed, waiting for greetd to hand over the display");
+        beginSigningIn();
+        return;
+      }
       kLog.info("session start confirmed, exiting greeter");
       if (m_onExitRequested) {
         m_onExitRequested();
@@ -1576,6 +1582,13 @@ void GreeterSurface::handleGreetdResponse(const GreetdResponse& response) {
     }
     return;
   }
+}
+
+void GreeterSurface::beginSigningIn() {
+  m_signingIn = true;
+  updateStatus("Signing in…", false);
+  syncAuthInteractivity();
+  commitImmediateFrame(false);
 }
 
 void GreeterSurface::setBusyIndicator(bool busy) {
@@ -1667,7 +1680,7 @@ void GreeterSurface::postAuthResponse(const std::string& data) {
 }
 
 void GreeterSurface::syncAuthInteractivity() {
-  const bool working = awaitingReply();
+  const bool working = awaitingReply() || m_signingIn;
   const bool busy = m_greetdUnavailable || m_sharedAuthBlocked || m_authCancelRequested || working;
   if (m_passwordField != nullptr) {
     m_passwordField->setEnabled(!busy);
