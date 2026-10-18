@@ -103,7 +103,6 @@ private:
   void handleAuthMessage(const GreetdAuthMessage& message);
   void beginSigningIn();
   void setBusyIndicator(bool busy);
-  void spinSignInSpinner();
   void postAuthResponse(const std::string& data);
   // Disable the password field and login button while a request is in flight.
   void syncAuthInteractivity();

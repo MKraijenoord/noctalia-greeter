@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "compositor/greetd_handover.h"
 #include "compositor/output_layout_move.h"
 #include "compositor/system_keyboard_config.h"
 #include "config/output_identity.h"
@@ -16,9 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <syslog.h>
@@ -2304,32 +2303,13 @@ static void handle_new_input(struct wl_listener* listener, void* data) {
   wlr_seat_set_capabilities(server->seat, caps);
 }
 
-static void send_handover(struct greeter_server* server, const char* message) {
-  if (server->handover_socket == NULL || server->handover_socket[0] == '\0') {
-    return;
-  }
-  struct sockaddr_un addr = {.sun_family = AF_UNIX};
-  if (strlen(server->handover_socket) >= sizeof(addr.sun_path)) {
-    return;
-  }
-  strcpy(addr.sun_path, server->handover_socket);
-  const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-  if (fd < 0) {
-    return;
-  }
-  if (sendto(fd, message, strlen(message), MSG_NOSIGNAL, (const struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    wlr_log_errno(WLR_ERROR, "failed to send %s to greetd", message);
-  }
-  close(fd);
-}
-
 static void send_presented(struct greeter_server* server) {
   if (server->presented_sent) {
     return;
   }
   server->presented_sent = true;
   wlr_log(WLR_INFO, "greeter presented on every output; releasing the session");
-  send_handover(server, "PRESENTED=1");
+  greetd_handover_send(server->handover_socket, "PRESENTED=1");
   struct greeter_output* output;
   wl_list_for_each(output, &server->outputs, link) {
     if (output->present_watched) {

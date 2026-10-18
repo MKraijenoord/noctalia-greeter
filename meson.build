@@ -140,6 +140,7 @@ _greeter_sources = files(
   'src/render/animation/animation.cpp',
   'src/render/animation/animation_manager.cpp',
   'src/render/animation/motion_service.cpp',
+  'src/render/animation/spin_animation.cpp',
   'src/ui/controls/box.cpp',
   'src/ui/controls/button.cpp',
   'src/ui/controls/input.cpp',
@@ -158,6 +159,7 @@ _greeter_sources = files(
   'src/ui/style.cpp',
   'src/accounts/accounts_icon.cpp',
   'src/greetd/greetd_client.cpp',
+  'src/greetd/greetd_handover.cpp',
   'src/greeter/appearance_sync.cpp',
   'src/greeter/appearance_config.cpp',
   'src/greeter/session_config.cpp',
@@ -295,6 +297,7 @@ install_data(
 
 noctalia_greeter_compositor_executable = executable('noctalia-greeter-compositor',
   sources: files(
+    'src/compositor/greetd_handover.c',
     'src/compositor/noctalia_compositor.c',
     'src/compositor/output_layout_move.c',
     'src/compositor/system_keyboard_config.c',

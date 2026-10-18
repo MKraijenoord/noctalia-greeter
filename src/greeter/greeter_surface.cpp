@@ -12,6 +12,7 @@
 #include "greeter/greeter_sessions.h"
 #include "greeter/greeter_window.h"
 #include "greeter/power_actions.h"
+#include "render/animation/spin_animation.h"
 #include "render/core/renderer.h"
 #include "render/core/texture_manager.h"
 #include "render/render_context.h"
@@ -1562,22 +1563,11 @@ void GreeterSurface::setBusyIndicator(bool busy) {
     loginGlyph->setVisible(!busy);
   }
   if (busy) {
-    spinSignInSpinner();
+    animateSpin(m_animations, *m_signInSpinner);
   } else {
     m_animations.cancelForOwner(m_signInSpinner);
   }
   requestLayout();
-}
-
-void GreeterSurface::spinSignInSpinner() {
-  constexpr float kTurn = 6.28318530718f;
-  constexpr float kTurnMs = 900.0f;
-  // One long linear animation: restarting from onComplete would modify the animation list while it is ticking.
-  constexpr float kTurns = 10000.0f;
-  m_animations.animate(
-      0.0f, kTurn * kTurns, kTurnMs * kTurns, Easing::Linear,
-      [this](float angle) { m_signInSpinner->setRotation(std::fmod(angle, kTurn)); }, nullptr, m_signInSpinner
-  );
 }
 
 void GreeterSurface::handleAuthMessage(const GreetdAuthMessage& message) {
