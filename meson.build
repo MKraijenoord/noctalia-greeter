@@ -296,6 +296,7 @@ install_data(
 noctalia_greeter_compositor_executable = executable('noctalia-greeter-compositor',
   sources: files(
     'src/compositor/noctalia_compositor.c',
+    'src/compositor/output_layout_move.c',
     'src/compositor/system_keyboard_config.c',
     'src/config/output_identity.c',
     'src/core/log.cpp',
