@@ -520,6 +520,42 @@ test(
   timeout: 30,
 )
 
+greetd_handover_test = executable(
+  'greetd-handover-test',
+  sources: files('tests/greetd_handover_test.cpp', 'src/greetd/greetd_handover.cpp', 'src/core/log.cpp'),
+  include_directories: include_directories('src'),
+  cpp_args: ['-Wall', '-Wextra', '-Wpedantic', '-Wconversion', '-Wshadow'],
+  build_by_default: false,
+)
+
+test('greetd-handover', greetd_handover_test)
+
+compositor_greetd_handover_test = executable(
+  'compositor-greetd-handover-test',
+  sources: files('tests/compositor_greetd_handover_test.c', 'src/compositor/greetd_handover.c'),
+  dependencies: [wlroots_dep],
+  include_directories: include_directories('src'),
+  c_args: ['-Wall', '-Wextra', '-Wpedantic', '-Wconversion', '-DWLR_USE_UNSTABLE'],
+  build_by_default: false,
+)
+
+test('compositor-greetd-handover', compositor_greetd_handover_test)
+
+spin_animation_test = executable(
+  'spin-animation-test',
+  sources: files(
+    'tests/spin_animation_test.cpp',
+    'src/render/animation/spin_animation.cpp',
+    'src/render/animation/animation_manager.cpp',
+    'src/render/scene/node.cpp',
+  ),
+  include_directories: include_directories('src'),
+  cpp_args: ['-Wall', '-Wextra', '-Wpedantic', '-Wconversion', '-Wshadow'],
+  build_by_default: false,
+)
+
+test('spin-animation', spin_animation_test)
+
 wallpaper_program_pixel_test = executable(
   'wallpaper-program-pixel-test',
   sources: files(
